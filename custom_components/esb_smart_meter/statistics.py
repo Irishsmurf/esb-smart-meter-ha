@@ -37,28 +37,22 @@ async def async_write_statistics(
     statistic_id: str,
     name: str,
     hourly: list[tuple[datetime, float]],
-    *,
-    rebuild: bool,
 ) -> int:
     """Write hourly kWh totals as a cumulative-sum external statistic.
 
     ESB only returns a rolling ~2 year window. Restarting the running sum from 0
     each time would leave a cliff where the window used to start, so the sum is
     anchored to what the recorder already holds for the window's first hour.
-    With ``rebuild`` the statistic is cleared first and rewritten from 0.
     """
     if not hourly:
         return 0
 
     accumulated = 0.0
-    if rebuild:
-        get_instance(hass).async_clear_statistics([statistic_id])
-    else:
-        stored = await _stored_sum(hass, statistic_id, hourly[0][0])
-        if stored is not None:
-            # Keep the stored first hour as-is and continue from it.
-            accumulated = stored
-            hourly = hourly[1:]
+    stored = await _stored_sum(hass, statistic_id, hourly[0][0])
+    if stored is not None:
+        # Keep the stored first hour as-is and continue from it.
+        accumulated = stored
+        hourly = hourly[1:]
 
     stat_data = []
     for start, kwh in hourly:
@@ -76,5 +70,5 @@ async def async_write_statistics(
     )
     if stat_data:
         async_add_external_statistics(hass, meta, stat_data)
-    _LOGGER.info("ESB: wrote %d hourly stat entries to %s%s", len(stat_data), statistic_id, " (rebuilt)" if rebuild else "")
+    _LOGGER.info("ESB: wrote %d hourly stat entries to %s", len(stat_data), statistic_id)
     return len(stat_data)

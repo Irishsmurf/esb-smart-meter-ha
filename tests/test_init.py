@@ -14,7 +14,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from pytest_homeassistant_custom_component.components.recorder.common import async_wait_recording_done
 
 from custom_components.esb_smart_meter.api import ESBAuthError, ESBCaptchaError
-from custom_components.esb_smart_meter.const import CONF_STATISTICS_VERSION, DOMAIN, STATISTICS_VERSION
+from custom_components.esb_smart_meter.const import DOMAIN
 
 from .conftest import MPRN, day_rows, make_csv
 
@@ -73,9 +73,8 @@ async def test_setup_writes_statistics_in_real_time_and_sensors(recorder_mock, h
     await _setup(hass, entry, lambda: csv)
 
     stats = await _stats(hass)
-    # Irish midnight 1 July (IST) is 23:00 UTC on 30 June.
-    assert stats[0] == (datetime(2026, 6, 30, 23, tzinfo=UTC), 2.0, 2.0)
-    assert stats[-1] == (datetime(2026, 7, 2, 22, tzinfo=UTC), 2.0, 96.0)
+    assert stats[0] == (datetime(2026, 7, 1, 0, tzinfo=UTC), 2.0, 2.0)
+    assert stats[-1] == (datetime(2026, 7, 2, 23, tzinfo=UTC), 2.0, 96.0)
     assert len(stats) == 48
 
     consumption = _state(hass, "last_day_consumption")
@@ -84,11 +83,9 @@ async def test_setup_writes_statistics_in_real_time_and_sensors(recorder_mock, h
     assert consumption.attributes["statistic_id"] == STAT_ID
     assert "state_class" not in consumption.attributes
     assert consumption.name == "ESB Smart Meter Last complete day consumption"
-    assert _state(hass, "latest_reading").state == "2026-07-02T23:00:00+00:00"
+    assert _state(hass, "latest_reading").state == "2026-07-03T00:00:00+00:00"
     assert _state(hass, "last_success").state not in ("unknown", "unavailable")
     assert _state(hass, "last_day_export") is None  # no export rows
-
-    assert entry.data[CONF_STATISTICS_VERSION] == STATISTICS_VERSION
 
 
 async def test_sum_stays_continuous_when_esb_window_rolls(recorder_mock, hass, entry, enable_custom_integrations):
@@ -100,24 +97,6 @@ async def test_sum_stays_continuous_when_esb_window_rolls(recorder_mock, hass, e
     assert len(stats) == 96
     sums = [s[2] for s in stats]
     assert sums == [2.0 * (i + 1) for i in range(96)]  # no cliff, still monotonic
-
-
-async def test_old_shifted_statistics_are_rebuilt_once(recorder_mock, hass, entry, enable_custom_integrations):
-    # Simulate statistics written by v1.0.0, which used the end time as UTC
-    # (in summer: 1.5h too late), including a point past the end of real data.
-    meta = StatisticMetaData(
-        mean_type=StatisticMeanType.NONE, has_sum=True, name="old", source=DOMAIN,
-        statistic_id=STAT_ID, unit_of_measurement="kWh", unit_class="energy",
-    )
-    async_add_external_statistics(hass, meta, [
-        StatisticData(start=datetime(2026, 7, 3, 0, tzinfo=UTC), state=99, sum=999),
-    ])
-    await async_wait_recording_done(hass)
-
-    await _setup(hass, entry, lambda: make_csv(day_rows(datetime(2026, 7, 1), 1, kwh=1.0)))
-    stats = await _stats(hass)
-    assert stats[-1] == (datetime(2026, 7, 1, 22, tzinfo=UTC), 2.0, 48.0)
-    assert all(s[2] != 999 for s in stats)
 
 
 async def test_export_statistic_and_sensor(recorder_mock, hass, entry, enable_custom_integrations):

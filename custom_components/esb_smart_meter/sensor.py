@@ -55,7 +55,7 @@ class ESBSensor(CoordinatorEntity[ESBCoordinator], SensorEntity):
 
 
 class LastDayConsumptionSensor(ESBSensor):
-    """Consumption for the most recent complete (Irish) day.
+    """Consumption for the most recent complete day.
 
     Deliberately has no state_class: it is a per-day figure, not a meter, and the
     Energy dashboard should use the ``esb_smart_meter:consumption_<MPRN>``

@@ -12,7 +12,7 @@ def no_sleep(monkeypatch):
 
 
 def make_csv(rows, descending=True):
-    """rows: iterable of (naive Irish end time, kWh[, read type])."""
+    """rows: iterable of (naive ESB timestamp, kWh[, read type])."""
     lines = []
     for row in rows:
         end, kwh, kind = (*row, "Active Import Interval (kWh)")[:3]
@@ -23,9 +23,9 @@ def make_csv(rows, descending=True):
 
 
 def day_rows(start: datetime, days: int, kwh: float = 0.5, kind: str = "Active Import Interval (kWh)"):
-    """Half-hourly rows (by naive wall-clock end time) covering whole days from start."""
-    end = start + timedelta(minutes=30)
+    """Half-hourly rows covering whole days from start (ESB stamps 00:00 .. 23:30)."""
+    stamp = start
     stop = start + timedelta(days=days)
-    while end <= stop:
-        yield end, kwh, kind
-        end += timedelta(minutes=30)
+    while stamp < stop:
+        yield stamp, kwh, kind
+        stamp += timedelta(minutes=30)

@@ -15,12 +15,12 @@ def test_hourly_totals_group_half_hours():
     assert hourly[0] == (datetime(2026, 1, 10, 0, tzinfo=UTC), 1.0)
 
 
-def test_last_complete_day_in_summer_uses_irish_days():
-    # Two full Irish days of data, plus 3 hours of a third.
+def test_last_complete_day_ignores_partial_newest_day():
+    # Two full days of data, plus 3 hours of a third.
     rows = list(day_rows(datetime(2026, 7, 1), 2, kwh=0.5))
-    rows += [(datetime(2026, 7, 3, 0, 30) + timedelta(minutes=30 * i), 2.0) for i in range(6)]
+    rows += [(datetime(2026, 7, 3, 0, 0) + timedelta(minutes=30 * i), 2.0) for i in range(6)]
     data = parse_csv(make_csv(rows))
-    assert latest_reading_end(data.imports) == datetime(2026, 7, 3, 2, 0, tzinfo=UTC)  # 03:00 IST
+    assert latest_reading_end(data.imports) == datetime(2026, 7, 3, 3, 0, tzinfo=UTC)
     assert last_complete_day(data.imports) == (date(2026, 7, 2), 24.0)
 
 

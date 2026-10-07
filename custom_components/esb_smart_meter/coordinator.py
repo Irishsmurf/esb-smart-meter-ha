@@ -16,13 +16,11 @@ from .api import ESBAuthError, ESBError, ESBNetworksAPI, parse_csv
 from .const import (
     CONF_MPRN,
     CONF_PASSWORD,
-    CONF_STATISTICS_VERSION,
     CONF_UPDATE_INTERVAL,
     CONF_USERNAME,
     DEFAULT_UPDATE_INTERVAL_HOURS,
     DOMAIN,
     FAILURE_ISSUE_AFTER_HOURS,
-    STATISTICS_VERSION,
 )
 from .processing import hourly_totals, last_complete_day, latest_reading_end
 from .statistics import async_write_statistics
@@ -124,13 +122,11 @@ class ESBCoordinator(DataUpdateCoordinator[ESBData]):
             self._report_failure(previous)
             return previous
 
-        rebuild = self.config_entry.data.get(CONF_STATISTICS_VERSION, 1) < STATISTICS_VERSION
         await async_write_statistics(
             self.hass,
             self.consumption_statistic_id,
             "ESB Smart Meter Consumption",
             hourly_totals(parsed.imports),
-            rebuild=rebuild,
         )
         if parsed.exports:
             await async_write_statistics(
@@ -138,12 +134,6 @@ class ESBCoordinator(DataUpdateCoordinator[ESBData]):
                 self.export_statistic_id,
                 "ESB Smart Meter Export",
                 hourly_totals(parsed.exports),
-                rebuild=rebuild,
-            )
-        if rebuild:
-            self.hass.config_entries.async_update_entry(
-                self.config_entry,
-                data={**self.config_entry.data, CONF_STATISTICS_VERSION: STATISTICS_VERSION},
             )
 
         self.last_error = None

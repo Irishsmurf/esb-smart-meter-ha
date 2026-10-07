@@ -8,7 +8,6 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from io import StringIO
-from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -20,9 +19,11 @@ LOGIN_BASE = "https://login.esbnetworks.ie"
 B2C_TENANT = "esbntwkscustportalprdb2c01.onmicrosoft.com"
 B2C_POLICY = "B2C_1A_signup_signin"
 
-# ESB CSV timestamps are Irish wall-clock time and mark the END of each
-# 30-minute interval.
-ESB_TZ = ZoneInfo("Europe/Dublin")
+# Despite the column name ("Read Date and End Time"), real data lines up with
+# each timestamp being the UTC *start* of its 30-minute interval: a ~3 kW
+# immersion running 06:00-06:40 UTC (07:00-07:40 Irish summer time) shows up
+# entirely in the readings stamped 06:00 and 06:30.
+ESB_TZ = timezone.utc
 INTERVAL = timedelta(minutes=30)
 
 # After ESB blocks (CAPTCHA) or rejects a login, don't try again for this long.
@@ -351,43 +352,31 @@ class ParsedData:
     exports: list[dict] = field(default_factory=list)
 
 
-def _interval_start(end_local: datetime, fold: int) -> datetime:
-    """Convert a naive Irish end-of-interval time to the interval's UTC start."""
-    return end_local.replace(tzinfo=ESB_TZ, fold=fold).astimezone(timezone.utc) - INTERVAL
+def _interval_start(stamp: datetime) -> datetime:
+    """Convert a naive ESB timestamp to the interval's aware UTC start."""
+    return stamp.replace(tzinfo=ESB_TZ)
 
 
 def parse_csv(csv_text: str) -> ParsedData:
     """Parse an ESB interval CSV into import (consumption) and export readings."""
-    rows = []
+    data = ParsedData()
     for row in csv.DictReader(StringIO(csv_text)):
         try:
             read_type = row.get("Read Type", "").strip()
             if "Active Import" in read_type:
-                kind = "imports"
+                readings = data.imports
             elif "Active Export" in read_type:
-                kind = "exports"
+                readings = data.exports
             else:
                 continue
             dt_str = row.get("Read Date and End Time", "").strip()
             value_str = row.get("Read Value", "").strip()
             if not dt_str or not value_str:
                 continue
-            rows.append((kind, datetime.strptime(dt_str, "%d-%m-%Y %H:%M"), float(value_str)))
+            stamp = datetime.strptime(dt_str, "%d-%m-%Y %H:%M")
+            readings.append({"start": _interval_start(stamp), "kwh": float(value_str)})
         except (ValueError, KeyError):
             continue
-
-    # When clocks go back, 01:00-02:00 Irish time happens twice and ESB lists the
-    # same wall-clock time twice. Give the chronologically second one fold=1.
-    # ESB files are usually newest-first, so work out the file's direction.
-    descending = len(rows) > 1 and rows[0][1] > rows[-1][1]
-    seen: dict[tuple[str, datetime], int] = {}
-    data = ParsedData()
-    for kind, end_local, kwh in (reversed(rows) if descending else rows):
-        occurrence = seen.get((kind, end_local), 0)
-        seen[(kind, end_local)] = occurrence + 1
-        getattr(data, kind).append(
-            {"start": _interval_start(end_local, fold=min(occurrence, 1)), "kwh": kwh}
-        )
 
     data.imports.sort(key=lambda x: x["start"])
     data.exports.sort(key=lambda x: x["start"])

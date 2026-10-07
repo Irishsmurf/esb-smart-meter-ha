@@ -20,11 +20,11 @@ def latest_reading_end(readings: list[dict]) -> datetime | None:
 
 
 def last_complete_day(readings: list[dict]) -> tuple[date, float] | None:
-    """The most recent Irish calendar day fully covered by the data, and its total kWh.
+    """The most recent calendar day (in ESB's timestamps) fully covered by the data, and its total kWh.
 
     The day containing the newest reading is only complete if that reading ended
     exactly at midnight, so the answer is always the day before the newest
-    reading's end date (in Irish time).
+    reading's end date.
     """
     end = latest_reading_end(readings)
     if end is None:

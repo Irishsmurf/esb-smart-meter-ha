@@ -7,7 +7,7 @@ Home Assistant integration for ESB Networks (Ireland) smart meters. Downloads yo
 
 ## Features
 
-- Full historical consumption data (up to 2 years) in the Energy Dashboard, at the correct hour (Irish time, including summer time)
+- Full historical consumption data (up to 2 years) in the Energy Dashboard
 - Solar export / microgeneration as a separate statistic, when your meter reports it
 - Daily and monthly bar charts out of the box
 - Updates every 6 hours by default (configurable)
@@ -66,7 +66,7 @@ Historical data (up to 2 years) is imported on first run.
 
 ## Upgrading from 1.0
 
-- Version 1.0 treated ESB's timestamps as UTC and as the start of each interval. They are actually Irish local time and mark the end of each interval, so hourly data was 30 minutes late in winter and 90 minutes late in summer. On the first successful update after upgrading, the `esb_smart_meter:consumption_<MPRN>` statistic is cleared and rewritten with correct times. Daily and monthly totals are unchanged except for readings that move across midnight.
+- Your existing Energy Dashboard history carries over unchanged. Timestamps are handled exactly as in 1.0: each ESB timestamp is the UTC start of its half-hour.
 - The old **ESB Smart Meter Consumption** entity is now **Last complete day consumption**. It keeps its entity ID (`sensor.esb_smart_meter_consumption`), but it is no longer a running meter. Home Assistant may show an issue under **Developer tools → Statistics** saying the entity no longer has a state class. Choose **Delete** to remove the old, unreliable statistics for that entity. This doesn't affect the Energy Dashboard statistic.
 
 ## Dashboard Cards

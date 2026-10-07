@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import pytest
 
 from custom_components.esb_smart_meter import api
+from custom_components.esb_smart_meter.processing import hourly_totals
 from custom_components.esb_smart_meter.api import (
     ESBAuthError,
     ESBCaptchaError,
@@ -17,33 +18,28 @@ from .conftest import make_csv
 UTC = timezone.utc
 
 
-def test_winter_readings_are_interval_start_in_utc():
+def test_timestamps_are_utc_interval_starts():
     data = parse_csv(make_csv([(datetime(2026, 1, 10, 0, 30), 0.25)]))
-    assert data.imports == [{"start": datetime(2026, 1, 10, 0, 0, tzinfo=UTC), "kwh": 0.25}]
+    assert data.imports == [{"start": datetime(2026, 1, 10, 0, 30, tzinfo=UTC), "kwh": 0.25}]
 
 
-def test_summer_readings_account_for_irish_summer_time():
-    # 00:30 IST end -> 00:00 IST start -> 23:00 UTC the previous day.
+def test_summer_timestamps_are_not_shifted_to_irish_time():
     data = parse_csv(make_csv([(datetime(2026, 7, 10, 0, 30), 0.25)]))
-    assert data.imports[0]["start"] == datetime(2026, 7, 9, 23, 0, tzinfo=UTC)
+    assert data.imports[0]["start"] == datetime(2026, 7, 10, 0, 30, tzinfo=UTC)
 
 
-@pytest.mark.parametrize("descending", [True, False])
-def test_clocks_going_back_keeps_both_repeated_half_hours(descending):
-    # 25 Oct 2026: 02:00 IST -> 01:00 GMT, so 01:00 and 01:30 appear twice.
-    ends = ["00:30", "01:00", "01:30", "01:00", "01:30", "02:00"]
-    rows = [(datetime.strptime(f"25-10-2026 {t}", "%d-%m-%Y %H:%M"), i) for i, t in enumerate(ends)]
-    data = parse_csv(make_csv(rows, descending=descending))
-    starts = [r["start"] for r in data.imports]
-    assert starts == [
-        datetime(2026, 10, 24, 23, 0, tzinfo=UTC),
-        datetime(2026, 10, 24, 23, 30, tzinfo=UTC),
-        datetime(2026, 10, 25, 0, 0, tzinfo=UTC),
-        datetime(2026, 10, 25, 0, 30, tzinfo=UTC),
-        datetime(2026, 10, 25, 1, 0, tzinfo=UTC),
-        datetime(2026, 10, 25, 1, 30, tzinfo=UTC),
+def test_real_immersion_spike_lands_in_the_hour_it_ran():
+    # From a real ESB export, 5 Oct 2026 (Irish summer time): the tank heated
+    # 06:00-06:40 UTC and HA's statistics show the whole ~2.1 kWh in 06:00-07:00 UTC.
+    rows = [
+        (datetime(2026, 10, 5, 5, 30), 0.065),
+        (datetime(2026, 10, 5, 6, 0), 1.65),
+        (datetime(2026, 10, 5, 6, 30), 0.597),
+        (datetime(2026, 10, 5, 7, 0), 0.06),
     ]
-    assert [r["kwh"] for r in data.imports] == [0, 1, 2, 3, 4, 5]
+    hourly = dict(hourly_totals(parse_csv(make_csv(rows)).imports))
+    assert round(hourly[datetime(2026, 10, 5, 6, tzinfo=UTC)], 3) == 2.247
+    assert hourly[datetime(2026, 10, 5, 7, tzinfo=UTC)] == 0.06
 
 
 def test_export_rows_are_separated():

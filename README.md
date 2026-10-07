@@ -7,11 +7,13 @@ Home Assistant integration for ESB Networks (Ireland) smart meters. Downloads yo
 
 ## Features
 
-- Full historical consumption data (up to 2 years) in the Energy Dashboard
+- Full historical consumption data (up to 2 years) in the Energy Dashboard, at the correct hour (Irish time, including summer time)
+- Solar export / microgeneration as a separate statistic, when your meter reports it
 - Daily and monthly bar charts out of the box
-- Updates every 6 hours
+- Updates every 6 hours by default (configurable)
 - Handles ESB Networks' Azure B2C login flow automatically
-- Session caching to minimise login frequency (CAPTCHA rate limit protection)
+- Reuses a saved login for as long as ESB accepts it, and waits 24 hours after a failed login (CAPTCHA rate limit protection)
+- Prompts you to re-enter your password if ESB rejects it, and raises a Repairs warning if updates keep failing
 
 ## Installation
 
@@ -41,11 +43,31 @@ Copy `custom_components/esb_smart_meter/` to your HA `config/custom_components/`
 
 Your MPRN is on your electricity bill or at [myaccount.esbnetworks.ie](https://myaccount.esbnetworks.ie) under your meter details.
 
+Home Assistant logs in once to check the credentials. That login is saved and reused for the first download.
+
+To change how often data is downloaded, go to **Settings → Devices & Services → ESB Smart Meter → Configure**.
+
+## Sensors
+
+| Sensor | Description |
+|--------|-------------|
+| Last complete day consumption | kWh used on the most recent full day ESB has published (usually 2–3 days ago). The `date` attribute says which day. |
+| Last complete day export | kWh exported on that day. Only created if your meter reports export. |
+| Latest reading | End of the newest half-hour ESB has published. |
+| Last successful update | When data was last downloaded. The `last_error` attribute shows why the most recent update failed, if it did. |
+
+These sensors are for display. **Don't add them to the Energy Dashboard.** Use the statistics described below instead, which carry the correct hourly timestamps.
+
 ## Energy Dashboard
 
-After the first successful update, your consumption data will appear at **Settings → Dashboards → Energy → Add consumption → Pick a statistical sensor** — select **ESB Smart Meter Consumption**.
+After the first successful update, your consumption data will appear at **Settings → Dashboards → Energy → Add consumption → Pick a statistical sensor** — select **ESB Smart Meter Consumption** (statistic ID `esb_smart_meter:consumption_<MPRN>`). If you export solar, add **ESB Smart Meter Export** (`esb_smart_meter:export_<MPRN>`) under **Return to grid**.
 
 Historical data (up to 2 years) is imported on first run.
+
+## Upgrading from 1.0
+
+- Version 1.0 treated ESB's timestamps as UTC and as the start of each interval. They are actually Irish local time and mark the end of each interval, so hourly data was 30 minutes late in winter and 90 minutes late in summer. On the first successful update after upgrading, the `esb_smart_meter:consumption_<MPRN>` statistic is cleared and rewritten with correct times. Daily and monthly totals are unchanged except for readings that move across midnight.
+- The old **ESB Smart Meter Consumption** entity is now **Last complete day consumption**. It keeps its entity ID (`sensor.esb_smart_meter_consumption`), but it is no longer a running meter. Home Assistant may show an issue under **Developer tools → Statistics** saying the entity no longer has a state class. Choose **Delete** to remove the old, unreliable statistics for that entity. This doesn't affect the Energy Dashboard statistic.
 
 ## Dashboard Cards
 
@@ -85,20 +107,22 @@ days_to_show: 365
 chart_type: bar
 ```
 
-### Yesterday's Usage (entity card)
+### Last complete day (entity card)
+
+If you upgraded from 1.0, the entity is `sensor.esb_smart_meter_consumption`.
 
 ```yaml
 type: entity
-entity: sensor.esb_smart_meter_consumption
-name: Yesterday's Usage
+entity: sensor.esb_smart_meter_last_complete_day_consumption
+name: Last Complete Day
 icon: mdi:transmission-tower
 ```
 
 ## Notes
 
 - **Data is typically 2–3 days behind.** ESB Networks publish smart meter readings with a delay — the most recent data available is usually 2 to 3 days ago, regardless of how frequently the integration updates. This is a limitation of the ESB Networks portal, not the integration.
-- ESB Networks rate-limits logins (~2 per IP per 24 hours). The integration caches sessions for 12 hours to minimise login attempts.
-- If you see `CAPTCHA detected` in the logs, the integration will retry automatically on the next 6-hour cycle.
+- ESB Networks rate-limits logins (~2 per IP per 24 hours). The integration reuses its saved login for as long as ESB accepts it, and only logs in again once it has expired.
+- If a login fails (for example `CAPTCHA detected`), the integration won't try to log in again for 24 hours, because retrying only extends the block. The sensors keep their last values in the meantime. If updates have been failing for more than a day, a warning appears under **Settings → Repairs**.
 - Data appears in the Energy Dashboard after the first successful update (may take a few minutes on first run due to the volume of historical data).
 
 ## Troubleshooting
@@ -106,12 +130,19 @@ icon: mdi:transmission-tower
 **No data after installation**
 
 Check **Settings → System → Logs** for `ESB:` log entries. Common causes:
-- Incorrect credentials — re-enter via Settings → Devices & Services → ESB Smart Meter → Configure
-- CAPTCHA rate limit — wait 24 hours and restart the integration
+- Incorrect credentials — Home Assistant will show a **Reconfigure** prompt under Settings → Devices & Services. Enter your current password there.
+- CAPTCHA rate limit — the integration retries by itself after 24 hours. Restarting doesn't help.
 
 **Data stops updating**
 
-Your ESB session may have expired. Restart the integration or wait for the next 6-hour cycle.
+Check the **Last successful update** sensor and its `last_error` attribute. Remember that ESB's newest data is usually 2–3 days old, so **Latest reading** lagging behind is normal.
+
+## Development
+
+```bash
+pip install -r requirements-test.txt
+pytest
+```
 
 ## License
 

@@ -43,12 +43,12 @@ chart_type: bar
 
 # ─────────────────────────────────────────
 # 3. Simple Entity Card
-#    Shows yesterday's total consumption (kWh).
-#    The sensor value is the most recent complete day.
+#    Shows the most recent complete day's consumption (kWh).
+#    If you upgraded from 1.0 the entity is sensor.esb_smart_meter_consumption.
 # ─────────────────────────────────────────
 type: entity
-entity: sensor.esb_smart_meter_consumption
-name: Yesterday's Usage
+entity: sensor.esb_smart_meter_last_complete_day_consumption
+name: Last Complete Day
 icon: mdi:transmission-tower
 
 ---
@@ -59,6 +59,6 @@ icon: mdi:transmission-tower
 type: glance
 title: ESB Smart Meter
 entities:
-  - entity: sensor.esb_smart_meter_consumption
-    name: Yesterday
+  - entity: sensor.esb_smart_meter_last_complete_day_consumption
+    name: Last complete day
     icon: mdi:transmission-tower

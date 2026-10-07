@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "ESB Smart Meter",
-        "description": "Enter your ESB Networks account credentials and MPRN.",
+        "description": "Enter your ESB Networks account credentials and MPRN. Home Assistant will log in once to check them.",
         "data": {
           "username": "Email address",
           "password": "Password",
@@ -13,10 +13,60 @@
           "mprn": "11-digit Meter Point Reference Number from your ESB Networks account",
           "username": "Your myaccount.esbnetworks.ie email address"
         }
+      },
+      "reauth_confirm": {
+        "title": "Re-enter ESB Networks credentials",
+        "description": "ESB Networks rejected the saved login. Enter your current email address and password.",
+        "data": {
+          "username": "Email address",
+          "password": "Password"
+        }
       }
     },
+    "error": {
+      "invalid_auth": "ESB Networks rejected that email address or password.",
+      "invalid_mprn": "The MPRN must be 11 digits.",
+      "rate_limited": "ESB Networks is asking for human verification (too many recent logins). Wait 24 hours and try again.",
+      "cannot_connect": "Could not log in to ESB Networks. Check the Home Assistant log for details."
+    },
     "abort": {
-      "already_configured": "This MPRN is already configured."
+      "already_configured": "This MPRN is already configured.",
+      "reauth_successful": "Credentials updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ESB Smart Meter options",
+        "data": {
+          "update_interval": "Update interval"
+        },
+        "data_description": {
+          "update_interval": "How often to download data. ESB publishes new readings about once a day; a saved login is reused between updates, so this rarely causes extra logins."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "last_day_consumption": {
+        "name": "Last complete day consumption"
+      },
+      "last_day_export": {
+        "name": "Last complete day export"
+      },
+      "latest_reading": {
+        "name": "Latest reading"
+      },
+      "last_success": {
+        "name": "Last successful update"
+      }
+    }
+  },
+  "issues": {
+    "update_failed": {
+      "title": "ESB Smart Meter data is not updating",
+      "description": "Downloading data from ESB Networks has been failing. Last error: {error}. Last successful update: {last_success}.\n\nIf ESB is asking for human verification, the integration waits 24 hours between login attempts. This warning clears on the next successful update."
     }
   }
 }

@@ -1,9 +1,12 @@
+import csv
+import hashlib
 import json
 import logging
 import random
 import re
 import time
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 
 import requests
@@ -16,12 +19,39 @@ LOGIN_BASE = "https://login.esbnetworks.ie"
 B2C_TENANT = "esbntwkscustportalprdb2c01.onmicrosoft.com"
 B2C_POLICY = "B2C_1A_signup_signin"
 
+# Despite the column name ("Read Date and End Time"), real data lines up with
+# each timestamp being the UTC *start* of its 30-minute interval: a ~3 kW
+# immersion running 06:00-06:40 UTC (07:00-07:40 Irish summer time) shows up
+# entirely in the readings stamped 06:00 and 06:30.
+ESB_TZ = timezone.utc
+INTERVAL = timedelta(minutes=30)
+
+# After ESB blocks (CAPTCHA) or rejects a login, don't try again for this long.
+# ESB allows roughly two logins per IP per day, so hammering only extends the block.
+LOGIN_BACKOFF = timedelta(hours=24)
+
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
 ]
+
+
+class ESBError(Exception):
+    """Generic failure talking to ESB Networks."""
+
+
+class ESBAuthError(ESBError):
+    """ESB rejected the username/password."""
+
+
+class ESBCaptchaError(ESBError):
+    """ESB demanded human verification (rate limited)."""
+
+
+class ESBLoginBackoff(ESBError):
+    """A recent login failed, so we are deliberately not trying again yet."""
 
 
 def _sleep(lo=1.5, hi=4.0):
@@ -44,29 +74,51 @@ class ESBNetworksAPI:
             "Accept-Encoding": "gzip, deflate, br",
         }
 
-    def _load_cached_session(self):
+    @property
+    def _credentials_hash(self) -> str:
+        return hashlib.sha256(f"{self._username}\0{self._password}".encode()).hexdigest()
+
+    # --- cache file -------------------------------------------------------
+
+    def _read_cache(self) -> dict:
         try:
             with open(self._cache_path) as f:
-                data = json.load(f)
-            cookies = data.get("cookies", {})
-            saved_at = data.get("saved_at", 0)
-            age_hours = (time.time() - saved_at) / 3600
-            if age_hours > 12:
-                _LOGGER.info("ESB: cached session expired (%.1fh old)", age_hours)
-                return None
-            _LOGGER.info("ESB: loaded cached session (%.1fh old)", age_hours)
-            return cookies
+                return json.load(f)
         except Exception:
-            return None
+            return {}
+
+    def _write_cache(self, data: dict) -> None:
+        try:
+            with open(self._cache_path, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            _LOGGER.warning("ESB: could not write session cache: %s", e)
 
     def _save_session(self, session: requests.Session):
-        try:
-            cookies = dict(session.cookies)
-            with open(self._cache_path, "w") as f:
-                json.dump({"cookies": cookies, "saved_at": time.time()}, f)
-            _LOGGER.info("ESB: session cached")
-        except Exception as e:
-            _LOGGER.warning("ESB: could not cache session: %s", e)
+        self._write_cache({"cookies": dict(session.cookies), "saved_at": time.time()})
+        _LOGGER.info("ESB: session cached")
+
+    def _record_login_failure(self, reason: str) -> None:
+        data = self._read_cache()
+        data["login_failure"] = {
+            "at": time.time(),
+            "reason": reason,
+            "credentials": self._credentials_hash,
+        }
+        self._write_cache(data)
+
+    def _check_backoff(self) -> None:
+        """Raise ESBLoginBackoff if a login with these credentials failed recently."""
+        failure = self._read_cache().get("login_failure")
+        if not failure or failure.get("credentials") != self._credentials_hash:
+            return
+        retry_at = failure.get("at", 0) + LOGIN_BACKOFF.total_seconds()
+        if time.time() < retry_at:
+            retry = datetime.fromtimestamp(retry_at, tz=timezone.utc)
+            raise ESBLoginBackoff(
+                f"last login failed ({failure.get('reason')}); "
+                f"not retrying until {retry.isoformat(timespec='minutes')}"
+            )
 
     def _validate_session(self, cookies: dict) -> bool:
         """Check if cached session cookies still work."""
@@ -81,13 +133,30 @@ class ESBNetworksAPI:
                 _LOGGER.info("ESB: cached session is valid")
                 self._session = s
                 return True
-            _LOGGER.warning("ESB: cached session invalid (status %s)", r.status_code)
+            _LOGGER.info("ESB: cached session no longer valid (status %s)", r.status_code)
         except Exception as e:
             _LOGGER.warning("ESB: session validation error: %s", e)
         return False
 
-    def _login(self) -> bool:
-        """Perform full Azure B2C login flow."""
+    # --- login --------------------------------------------------------------
+
+    def login(self) -> None:
+        """Perform the full Azure B2C login flow, honouring the CAPTCHA/rejection backoff.
+
+        Raises ESBAuthError, ESBCaptchaError, ESBLoginBackoff or ESBError.
+        """
+        self._check_backoff()
+        try:
+            self._login()
+        except ESBCaptchaError:
+            self._record_login_failure("captcha")
+            raise
+        except ESBAuthError:
+            self._record_login_failure("rejected")
+            raise
+        # Other failures (network blips, page changes) are retried next update.
+
+    def _login(self) -> None:
         _LOGGER.info("ESB: starting login flow")
         s = requests.Session()
         s.headers.update(self._base_headers())
@@ -97,24 +166,20 @@ class ESBNetworksAPI:
             r1 = s.get(BASE_URL, timeout=20)
             r1.raise_for_status()
         except Exception as e:
-            _LOGGER.error("ESB: step 1 failed: %s", e)
-            return False
+            raise ESBError(f"step 1 failed: {e}") from e
 
         settings_match = re.findall(r"(?<=var SETTINGS = )\S*;", r1.text)
         if not settings_match:
-            _LOGGER.error("ESB: could not find SETTINGS in login page")
-            return False
+            raise ESBError("could not find SETTINGS in login page")
         try:
             settings = json.loads(settings_match[0].rstrip(";"))
         except Exception as e:
-            _LOGGER.error("ESB: could not parse SETTINGS JSON: %s", e)
-            return False
+            raise ESBError(f"could not parse SETTINGS JSON: {e}") from e
 
         csrf = settings.get("csrf")
         trans_id = settings.get("transId")
         if not csrf or not trans_id:
-            _LOGGER.error("ESB: missing csrf or transId in SETTINGS")
-            return False
+            raise ESBError("missing csrf or transId in SETTINGS")
 
         _sleep()
 
@@ -143,16 +208,17 @@ class ESBNetworksAPI:
                 timeout=20,
             )
         except Exception as e:
-            _LOGGER.error("ESB: step 2 (SelfAsserted) failed: %s", e)
-            return False
+            raise ESBError(f"step 2 (SelfAsserted) failed: {e}") from e
 
         try:
             r2_json = r2.json()
         except Exception:
             r2_json = {}
         if str(r2_json.get("status")) != "200":
-            _LOGGER.error("ESB: login rejected (bad credentials?): %s", r2_json)
-            return False
+            message = str(r2_json.get("message", ""))
+            if _looks_like_captcha(message) or _looks_like_captcha(r2.text):
+                raise ESBCaptchaError("CAPTCHA required at sign-in")
+            raise ESBAuthError(f"login rejected: {message or r2_json or r2.status_code}")
 
         _sleep()
 
@@ -165,18 +231,15 @@ class ESBNetworksAPI:
             r3 = s.get(confirmed_url, timeout=20)
             r3.raise_for_status()
         except Exception as e:
-            _LOGGER.error("ESB: step 3 (confirmed) failed: %s", e)
-            return False
+            raise ESBError(f"step 3 (confirmed) failed: {e}") from e
 
-        if "captcha" in r3.text.lower() or "robot" in r3.text.lower():
-            _LOGGER.error("ESB: CAPTCHA detected — rate limit hit. Will retry next cycle.")
-            return False
+        if _looks_like_captcha(r3.text):
+            raise ESBCaptchaError("CAPTCHA detected — rate limit hit")
 
         soup3 = BeautifulSoup(r3.text, "html.parser")
         form = soup3.find("form", {"id": "auto"})
         if not form:
-            _LOGGER.error("ESB: could not find auto-submit form in confirmed page")
-            return False
+            raise ESBError("could not find auto-submit form in confirmed page")
 
         action_url = form.get("action", "")
         form_data = {inp.get("name"): inp.get("value", "") for inp in form.find_all("input") if inp.get("name")}
@@ -185,7 +248,7 @@ class ESBNetworksAPI:
 
         # Step 4 — POST to signin-oidc
         try:
-            r4 = s.post(
+            s.post(
                 action_url,
                 data=form_data,
                 headers={
@@ -197,8 +260,7 @@ class ESBNetworksAPI:
                 timeout=20,
             )
         except Exception as e:
-            _LOGGER.error("ESB: step 4 (signin-oidc) failed: %s", e)
-            return False
+            raise ESBError(f"step 4 (signin-oidc) failed: {e}") from e
 
         _sleep()
 
@@ -207,15 +269,13 @@ class ESBNetworksAPI:
             r5 = s.get(BASE_URL, headers={"Referer": LOGIN_BASE}, timeout=20)
             r5.raise_for_status()
         except Exception as e:
-            _LOGGER.error("ESB: step 5 (homepage finalise) failed: %s", e)
-            return False
+            raise ESBError(f"step 5 (homepage finalise) failed: {e}") from e
 
         _sleep(0.5, 1.5)
 
         _LOGGER.info("ESB: login successful")
         self._session = s
         self._save_session(s)
-        return True
 
     def _get_xsrf_token(self) -> str | None:
         try:
@@ -231,29 +291,27 @@ class ESBNetworksAPI:
             r.raise_for_status()
             return r.json().get("token")
         except Exception as e:
-            _LOGGER.error("ESB: failed to get XSRF token: %s", e)
+            _LOGGER.warning("ESB: failed to get XSRF token: %s", e)
             return None
 
-    def download_csv(self) -> str | None:
-        """Ensure authenticated, then POST to DownloadHdfPeriodic for CSV data."""
-        # Try cached session first
-        cached = self._load_cached_session()
-        if cached and self._validate_session(cached):
-            pass  # self._session set by _validate_session
-        else:
-            if not self._login():
-                return None
+    def download_csv(self) -> str:
+        """Ensure authenticated, then POST to DownloadHdfPeriodic for CSV data.
+
+        A cached session is reused for as long as ESB accepts it; a fresh login
+        only happens when it has expired. Raises an ESBError subclass on failure.
+        """
+        cookies = self._read_cache().get("cookies")
+        if not (cookies and self._validate_session(cookies)):
+            self.login()
 
         token = self._get_xsrf_token()
         if not token:
             # Session may have expired mid-flight — try fresh login
             _LOGGER.warning("ESB: no XSRF token, retrying with fresh login")
-            if not self._login():
-                return None
+            self.login()
             token = self._get_xsrf_token()
         if not token:
-            _LOGGER.error("ESB: could not get XSRF token after fresh login")
-            return None
+            raise ESBError("could not get XSRF token after fresh login")
 
         _sleep(0.5, 1.5)
 
@@ -272,38 +330,58 @@ class ESBNetworksAPI:
             )
             r.raise_for_status()
         except Exception as e:
-            _LOGGER.error("ESB: CSV download failed: %s", e)
-            return None
+            raise ESBError(f"CSV download failed: {e}") from e
 
-        ct = r.headers.get("Content-Type", "")
         if len(r.content) < 100:
-            _LOGGER.error("ESB: response too short (%d bytes): %s", len(r.content), r.text[:200])
-            return None
+            raise ESBError(f"response too short ({len(r.content)} bytes): {r.text[:200]}")
 
-        _LOGGER.info("ESB: downloaded %d bytes (ct=%s)", len(r.content), ct)
+        _LOGGER.info("ESB: downloaded %d bytes (ct=%s)", len(r.content), r.headers.get("Content-Type", ""))
         return r.text
 
 
-def parse_csv(csv_text: str) -> list[dict]:
-    """Parse ESB CSV into list of {dt: datetime, kwh: float} for Active Import only."""
-    import csv
-    results = []
-    reader = csv.DictReader(StringIO(csv_text))
-    for row in reader:
+def _looks_like_captcha(text: str) -> bool:
+    text = text.lower()
+    return "captcha" in text or "robot" in text
+
+
+@dataclass
+class ParsedData:
+    """Half-hourly readings as {start: aware UTC datetime, kwh: float}, sorted."""
+
+    imports: list[dict] = field(default_factory=list)
+    exports: list[dict] = field(default_factory=list)
+
+
+def _interval_start(stamp: datetime) -> datetime:
+    """Convert a naive ESB timestamp to the interval's aware UTC start."""
+    return stamp.replace(tzinfo=ESB_TZ)
+
+
+def parse_csv(csv_text: str) -> ParsedData:
+    """Parse an ESB interval CSV into import (consumption) and export readings."""
+    data = ParsedData()
+    for row in csv.DictReader(StringIO(csv_text)):
         try:
             read_type = row.get("Read Type", "").strip()
-            # Only import consumption, skip export rows
-            if "Active Import" not in read_type:
+            if "Active Import" in read_type:
+                readings = data.imports
+            elif "Active Export" in read_type:
+                readings = data.exports
+            else:
                 continue
             dt_str = row.get("Read Date and End Time", "").strip()
             value_str = row.get("Read Value", "").strip()
             if not dt_str or not value_str:
                 continue
-            dt = datetime.strptime(dt_str, "%d-%m-%Y %H:%M").replace(tzinfo=timezone.utc)
-            kwh = float(value_str)
-            results.append({"dt": dt, "kwh": kwh})
+            stamp = datetime.strptime(dt_str, "%d-%m-%Y %H:%M")
+            readings.append({"start": _interval_start(stamp), "kwh": float(value_str)})
         except (ValueError, KeyError):
             continue
-    results.sort(key=lambda x: x["dt"])
-    _LOGGER.info("ESB: parsed %d import datapoints from CSV", len(results))
-    return results
+
+    data.imports.sort(key=lambda x: x["start"])
+    data.exports.sort(key=lambda x: x["start"])
+    _LOGGER.info(
+        "ESB: parsed %d import and %d export datapoints from CSV",
+        len(data.imports), len(data.exports),
+    )
+    return data
